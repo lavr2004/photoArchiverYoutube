@@ -16,7 +16,6 @@ import gc
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Глобальные переменные
-# ROOT_DIRECTORY = r"E:\GOOGLE_DRIVE_BACKUP\20250114_GOOGLE_PHOTOS_BACKUP\2024"
 ROOT_DIRECTORY = r"E:\GOOGLE_DRIVE_BACKUP\20250114_GOOGLE_PHOTOS_BACKUP\takeout_photos_2022"
 RESULTS_FOLDER_PATH = os.path.join(os.getcwd(), "data/results")
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff'}
@@ -28,16 +27,19 @@ TEXT_COLOR = (255, 255, 255)  # Белый (RGB)
 TEXT_STROKE_COLOR = (0, 0, 0)  # Чёрный (RGB)
 TEXT_STROKE_WIDTH = 1
 MAX_FILE_SIZE_MB = 1000  # Лимит размера видео (~1 ГБ)
-MAX_CLIPS_PER_PART = 1200  # Максимум клипов на часть (~10 минут)
+MAX_CLIPS_PER_PART = 3000  # Максимум клипов на часть (300 ~ 10 минут)
 TARGET_RESOLUTION = (1920, 1080)  # FullHD
 PHOTO_DURATION = 2.0  # Длительность изображения
 BATCH_SIZE = 10  # Размер батча
 FPS = 1  # Частота кадров
 BITRATE = "12M"  # Битрейт (~12 Мбит/с)
+OUTPUT_FILENAME_TEMPLATE = "{first_date}_{last_date}_{num_photos}-photos_{part_number:03d}.mp4"
+
 
 def parse_filename_timestamp(file_path):
     """Извлечь дату и время из имени файла."""
     filename = os.path.basename(file_path)
+
     # Формат FB_IMG_1720975722339.jpg
     fb_pattern = r'FB_IMG_(\d+)\.jpg'
     fb_match = re.match(fb_pattern, filename, re.IGNORECASE)
@@ -50,21 +52,10 @@ def parse_filename_timestamp(file_path):
             return None
 
     # Формат IMG_YYYYMMDD_HHMMSSXXX[_HDR].jpg
-    # img_pattern = r'IMG_(\d{8})_(\d{6})\d{0,3}(?:_HDR)?\.jpg'
-    # img_match = re.match(img_pattern, filename, re.IGNORECASE)
-    # if img_match:
-    #     date_str, time_str = img_match.groups()
-    #     try:
-    #         dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H%M%S")
-    #         return int(dt.timestamp())
-    #     except ValueError as e:
-    #         logging.warning(f"Некорректный формат даты/времени в имени {filename}: {e}")
-    #         return None
-
-    name_lst = filename.split('_')
-    if len(name_lst) > 2:
-        date_str = name_lst[1]
-        time_str = name_lst[2]
+    img_pattern = r'IMG_(\d{8})_(\d{6})\d{0,3}(?:_HDR)?\.jpg'
+    img_match = re.match(img_pattern, filename, re.IGNORECASE)
+    if img_match:
+        date_str, time_str = img_match.groups()
         try:
             dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H%M%S")
             return int(dt.timestamp())
@@ -72,7 +63,26 @@ def parse_filename_timestamp(file_path):
             logging.warning(f"Некорректный формат даты/времени в имени {filename}: {e}")
             return None
 
+    name_lst = filename.split('_')
+    if len(name_lst) > 2:
+        date_str = name_lst[1]
+        time_str = name_lst[2]
+        try:
+            if len(time_str) > 6:
+                time_str = time_str[0:6]
+            dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H%M%S")
+            return int(dt.timestamp())
+        except ValueError as e:
+            logging.warning(f"Некорректный формат даты/времени в имени {filename}: {e}")
+            return None
+
     return None
+
+def get_text_timestamp_from_filename(file_path):
+    timestamp_int = parse_filename_timestamp(file_path)
+    if timestamp_int:
+        return str(datetime.fromtimestamp(timestamp_int))
+    return ""
 
 def get_json_timestamp(file_path):
     """Извлечь timestamp из JSON-файла."""
@@ -142,7 +152,7 @@ def get_json_text_data(file_path):
         return text
     except Exception as e:
         logging.error(f"Ошибка чтения JSON {json_path}: {e}")
-        return "Неизвестно"
+        return ""
 
 def add_text_to_image(image, text, font_type=FONT_TYPE, font_size=FONT_SIZE,
                       text_position=TEXT_POSITION, text_color=TEXT_COLOR,
@@ -235,13 +245,13 @@ def collect_image_files(root_dir):
 def create_video_part(image_files, part_number, output_dir, photo_duration=2.0,
                       target_resolution=(1920, 1080), batch_size=10):
     """Создать одну часть видео из изображений."""
-    output_filename = f"output_video_{part_number:03d}.mp4"
-    output_path = os.path.join(output_dir, output_filename)
     clips = []  # Текущий батч клипов
     batch_clips = []  # Все батчи для части
     clip_count = 0
     temp_image_dir = os.path.join(output_dir, "temp_images")
     os.makedirs(temp_image_dir, exist_ok=True)
+    first_timestamp = None
+    last_timestamp = None
 
     for i, file_path in enumerate(image_files):
         if clip_count >= MAX_CLIPS_PER_PART:
@@ -264,8 +274,16 @@ def create_video_part(image_files, part_number, output_dir, photo_duration=2.0,
                 logging.warning(f"Некорректное изображение после масштабирования: {file_path}")
                 continue
 
+            # Обновление временных меток
+            timestamp = get_file_timestamp(file_path)
+            if first_timestamp is None:
+                first_timestamp = timestamp
+            last_timestamp = timestamp
+
             # Добавление текста
             text = get_json_text_data(file_path)
+            if not text:
+                text = get_text_timestamp_from_filename(file_path)
             img_with_text = add_text_to_image(img, text)
 
             # Сохранение временного изображения
@@ -329,6 +347,23 @@ def create_video_part(image_files, part_number, output_dir, photo_duration=2.0,
         logging.error(f"Нет подходящих батчей для части {part_number}.")
         shutil.rmtree(temp_image_dir, ignore_errors=True)
         return None, image_files
+
+    # Формирование имени файла
+    try:
+        first_date = datetime.fromtimestamp(first_timestamp).strftime("%Y-%m-%d") if first_timestamp else "unknown"
+        last_date = datetime.fromtimestamp(last_timestamp).strftime("%Y-%m-%d") if last_timestamp else "unknown"
+        num_photos = clip_count
+        output_filename = OUTPUT_FILENAME_TEMPLATE.format(
+            first_date=first_date,
+            last_date=last_date,
+            num_photos=num_photos,
+            part_number=part_number
+        )
+        output_path = os.path.join(output_dir, output_filename)
+    except Exception as e:
+        logging.error(f"Ошибка формирования имени файла: {e}")
+        output_filename = f"output_video_{part_number:03d}.mp4"
+        output_path = os.path.join(output_dir, output_filename)
 
     # Финальная сборка
     try:
